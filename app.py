@@ -1,5 +1,7 @@
-"""Ledger — local sales and financial management. Python 3.10+, no dependencies."""
+"""Nexvant Engineering — local sales and financial management. Python 3.10+."""
 import argparse
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -18,6 +20,7 @@ ROOT = Path(__file__).parent
 DB_PATH = Path(os.environ.get('SALES_DB', ROOT / 'data' / 'sales.db'))
 SESSIONS = {}
 KINDS = ('invoice', 'quotation', 'purchase_order')
+LOGO_LIMIT = 700 * 1024
 
 
 def connect():
@@ -39,9 +42,13 @@ def initialize():
         CREATE TABLE IF NOT EXISTS lines(id INTEGER PRIMARY KEY,document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,product_id INTEGER NOT NULL REFERENCES products(id),name TEXT NOT NULL,qty INTEGER NOT NULL,price INTEGER NOT NULL,cost INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY,document_id INTEGER NOT NULL REFERENCES documents(id),amount INTEGER NOT NULL,paid TEXT NOT NULL,reference TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS expenses(id INTEGER PRIMARY KEY,description TEXT NOT NULL,amount INTEGER NOT NULL,paid TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS document_numbers(number TEXT PRIMARY KEY);
         ''')
-        defaults = {'company':'Your company','address':'','currency':'INR','invoice_next':'1','quotation_next':'1','purchase_order_next':'1','invoice_prefix':'INV-','quotation_prefix':'QUO-','purchase_order_prefix':'PO-'}
+        defaults = {'company':'Nexvant Engineering','address':'','currency':'INR','invoice_next':'1','quotation_next':'1','purchase_order_next':'1','invoice_prefix':'INV-','quotation_prefix':'QUO-','purchase_order_prefix':'PO-',
+                    'logo':'','email':'','phone':'','tax_id':'','bank_details':'','document_terms':''}
         db.executemany('INSERT OR IGNORE INTO settings VALUES (?,?)', defaults.items())
+        db.execute("UPDATE settings SET value='Nexvant Engineering' WHERE key='company' AND value='Your company'")
+        db.execute('INSERT OR IGNORE INTO document_numbers SELECT number FROM documents')
 
 
 def password_hash(password, salt):
@@ -78,6 +85,29 @@ def integer(value, minimum=1):
 
 def valid_date(value):
     return date.fromisoformat(str(value)).isoformat()
+
+
+def validate_logo(value):
+    """Accept small raster data URLs only; SVG/remote URLs are deliberately excluded."""
+    if not value:
+        return ''
+    if not isinstance(value, str) or len(value) > (LOGO_LIMIT + 2) // 3 * 4 + 40:
+        raise ValueError('Logo must be a PNG, JPEG, or WebP image under 700 KiB.')
+    header, separator, encoded = value.partition(',')
+    if not separator or header not in ('data:image/png;base64', 'data:image/jpeg;base64', 'data:image/webp;base64'):
+        raise ValueError('Upload a PNG, JPEG, or WebP logo.')
+    try:
+        image = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError('Logo contains invalid image data.') from None
+    signatures = {
+        'data:image/png;base64': image.startswith(b'\x89PNG\r\n\x1a\n'),
+        'data:image/jpeg;base64': image.startswith(b'\xff\xd8\xff'),
+        'data:image/webp;base64': image.startswith(b'RIFF') and image[8:12] == b'WEBP',
+    }
+    if len(image) > LOGO_LIMIT or not signatures[header]:
+        raise ValueError('Logo must be a PNG, JPEG, or WebP image under 700 KiB.')
+    return value
 
 
 def rows(db, sql, params=()):
@@ -145,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute('BEGIN IMMEDIATE')
                 result = self.mutate(db, self.path, data)
             self.send(200, result)
-        except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
+        except (ValueError, KeyError, TypeError, OverflowError, sqlite3.IntegrityError) as exc:
             self.send(400, {'error':str(exc)})
         except PermissionError as exc:
             self.send(401, {'error':str(exc)})
@@ -158,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
             password, clear = required(data,'password'), required(data,'clear_password')
             if min(len(password),len(clear)) < 10:
                 raise ValueError('Both passwords must contain at least 10 characters.')
+            if password == clear:
+                raise ValueError('Use different login and data clearing passwords.')
             salt, clear_salt = secrets.token_hex(16), secrets.token_hex(16)
             db.execute('INSERT INTO users VALUES(1,?,?,?,?,?)',(username,salt,password_hash(password,salt),clear_salt,password_hash(clear,clear_salt)))
             return {'ok':True}
@@ -215,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
                 quantities[product['id']] = quantities.get(product['id'],0)+qty
                 subtotal += qty*price
                 cost += qty*product['cost']
+                if max(subtotal, cost) > 2**63 - 1:
+                    raise ValueError('Document amount exceeds the supported accounting limit.')
                 lines.append((product['id'],product['name'],qty,price,product['cost']))
             if kind == 'invoice':
                 for pid, qty in quantities.items():
@@ -223,7 +257,12 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute('UPDATE products SET stock=stock-? WHERE id=?',(qty,pid))
             settings = dict(db.execute('SELECT key,value FROM settings').fetchall())
             number = settings[kind+'_prefix'] + str(int(settings[kind+'_next'])).zfill(5)
+            if db.execute('SELECT 1 FROM document_numbers WHERE number=?', (number,)).fetchone():
+                raise ValueError('This document number was already issued. Choose an unused next number in Settings.')
+            db.execute('INSERT INTO document_numbers VALUES (?)', (number,))
             tax = money(data.get('tax',0))
+            if subtotal + tax > 2**63 - 1:
+                raise ValueError('Document amount exceeds the supported accounting limit.')
             cursor = db.execute('INSERT INTO documents(kind,number,party_id,issued,due,total,cost,tax,notes) VALUES(?,?,?,?,?,?,?,?,?)',(kind,number,party['id'],issued,due,subtotal+tax,cost,tax,str(data.get('notes',''))))
             db.executemany('INSERT INTO lines(document_id,product_id,name,qty,price,cost) VALUES(?,?,?,?,?,?)',[(cursor.lastrowid,*line) for line in lines])
             db.execute('UPDATE settings SET value=? WHERE key=?',(str(int(settings[kind+'_next'])+1),kind+'_next'))
@@ -252,26 +291,41 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Expense must be positive.')
             db.execute('INSERT INTO expenses(description,amount,paid) VALUES(?,?,?)',(required(data,'description'),amount,valid_date(data['paid'])))
         elif path == '/api/settings':
-            for key in ('company','address','currency'):
-                value = str(data.get(key,''))
-                if key != 'address' and not value.strip():
+            for key in ('company','address','currency','email','phone','tax_id','bank_details','document_terms','logo'):
+                if key not in data:
+                    continue
+                value = str(data[key])
+                if key in ('company','currency') and not value.strip():
                     raise ValueError(f'{key} is required.')
                 if key == 'currency' and (len(value) != 3 or not value.isalpha()):
                     raise ValueError('Use a three-letter currency code.')
+                if key == 'logo':
+                    value = validate_logo(value)
+                elif len(value) > 2000:
+                    raise ValueError(f'{key} must be 2000 characters or fewer.')
                 db.execute('UPDATE settings SET value=? WHERE key=?',(value,key))
+            current = dict(db.execute('SELECT key,value FROM settings').fetchall())
+            proposed = set()
             for kind in KINDS:
-                counter = integer(data[kind+'_next'])
-                prefix = str(data[kind+'_prefix']).strip()
+                counter = integer(data.get(kind+'_next', current[kind+'_next']))
+                prefix = str(data.get(kind+'_prefix', current[kind+'_prefix'])).strip()
                 if len(prefix)>30:
                     raise ValueError('Prefixes must be 30 characters or fewer.')
-                if db.execute('SELECT 1 FROM documents WHERE number=?',(prefix+str(counter).zfill(5),)).fetchone():
-                    raise ValueError('This starting number already exists.')
+                number = prefix+str(counter).zfill(5)
+                if number in proposed or db.execute('SELECT 1 FROM document_numbers WHERE number=?',(number,)).fetchone():
+                    raise ValueError('This starting number is already used or conflicts with another document type.')
+                proposed.add(number)
                 db.execute('UPDATE settings SET value=? WHERE key=?',(str(counter),kind+'_next'))
                 db.execute('UPDATE settings SET value=? WHERE key=?',(prefix,kind+'_prefix'))
         elif path == '/api/passwords':
             user = db.execute('SELECT * FROM users WHERE id=?',(session['user_id'],)).fetchone()
             if not check_password(str(data.get('current_password','')),user['salt'],user['password']):
                 raise PermissionError('Current login password is incorrect.')
+            new_login, new_clear = str(data.get('password','')), str(data.get('clear_password',''))
+            if (new_login and new_clear and new_login == new_clear
+                    or new_login and not new_clear and check_password(new_login,user['clear_salt'],user['clear_password'])
+                    or new_clear and not new_login and check_password(new_clear,user['salt'],user['password'])):
+                raise ValueError('Use different login and data clearing passwords.')
             for name, salt_col, hash_col in [('password','salt','password'),('clear_password','clear_salt','clear_password')]:
                 value = str(data.get(name,''))
                 if value:
@@ -282,7 +336,15 @@ class Handler(BaseHTTPRequestHandler):
             SESSIONS.clear()
         elif path == '/api/clear':
             user=db.execute('SELECT * FROM users WHERE id=?',(session['user_id'],)).fetchone()
+            attempts = getattr(self.server, 'clear_attempts', {})
+            self.server.clear_attempts = attempts
+            key = session['user_id']
+            recent = [t for t in attempts.get(key, []) if t > time.time()-60]
+            attempts[key] = recent
+            if len(recent) >= 5:
+                raise PermissionError('Too many clearing attempts. Try again in one minute.')
             if data.get('confirmation') != 'CLEAR ALL DATA' or not check_password(str(data.get('password','')),user['clear_salt'],user['clear_password']):
+                recent.append(time.time())
                 raise PermissionError('Clearing password or confirmation is incorrect.')
             for table in ('payments','lines','documents','expenses','products','parties'):
                 db.execute(f'DELETE FROM {table}')
@@ -314,7 +376,7 @@ if __name__ == '__main__':
     args=parser.parse_args()
     initialize()
     server = ThreadingHTTPServer((args.host,args.port),Handler)
-    print(f'Ledger running at http://{args.host}:{args.port}',flush=True)
+    print(f'Nexvant Engineering running at http://{args.host}:{args.port}',flush=True)
     if args.open_browser:
         threading.Timer(0.5, webbrowser.open, args=(f'http://127.0.0.1:{args.port}',)).start()
     server.serve_forever()

@@ -6,5 +6,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-py -3 app.py --open-browser
-pause
+py -3 windows\desktop.py
+if errorlevel 1 pause

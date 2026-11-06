@@ -1,0 +1,2 @@
+# Build tooling only. The application itself uses the Python standard library.
+PyInstaller==6.16.0

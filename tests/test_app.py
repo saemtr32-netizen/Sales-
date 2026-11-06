@@ -1,10 +1,12 @@
 import http.cookiejar
+import base64
 import json
 import tempfile
 import threading
 import unittest
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 import app
@@ -117,6 +119,140 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.client.open(req)
         self.assertEqual(error.exception.code,403)
+
+    def test_branding_settings_and_logo_validation(self):
+        settings = self.call('state')['settings']
+        self.assertEqual(settings['company'], 'Nexvant Engineering')
+        # A small valid PNG; logo and business fields persist through restarts.
+        logo = 'data:image/png;base64,' + base64.b64encode(base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9F8AAAAASUVORK5CYII='
+        )).decode()
+        self.call('settings', {'logo':logo, 'email':'accounts@nexvant.example',
+                               'phone':'12345', 'tax_id':'TEST-TAX',
+                               'bank_details':'Example Bank', 'document_terms':'Payment within 30 days.'})
+        app.initialize()
+        saved = self.call('state')['settings']
+        self.assertEqual(saved['logo'], logo)
+        self.assertEqual(saved['bank_details'], 'Example Bank')
+        self.assertEqual(saved['company'], 'Nexvant Engineering')
+        for bad in ('data:image/svg+xml;base64,PHN2Zz4=',
+                    'https://untrusted.example/logo.png',
+                    'data:image/png;base64,not-base64',
+                    'data:image/png;base64,' + base64.b64encode(b'not a PNG').decode(),
+                    'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'0' * app.LOGO_LIMIT).decode()):
+            self.call('settings', {'logo':bad}, 400)
+        self.assertEqual(self.call('state')['settings']['logo'], logo)
+        self.call('settings', {'logo':''})
+        self.assertEqual(self.call('state')['settings']['logo'], '')
+
+    def test_starting_numbers_and_reserved_numbers_after_clearing(self):
+        self.seed()
+        self.call('settings', {'invoice_prefix':'NE/INV/', 'invoice_next':'100',
+                               'quotation_prefix':'NE/Q/', 'quotation_next':'500'})
+        self.document()
+        self.document('quotation')
+        docs = self.call('state')['documents']
+        self.assertEqual({d['number'] for d in docs}, {'NE/INV/00100', 'NE/Q/00500'})
+        self.call('clear', {'password':'a-clearing-password', 'confirmation':'CLEAR ALL DATA'})
+        self.assertEqual(self.call('state')['documents'], [])
+        self.call('settings', {'invoice_next':'100'}, 400)
+        self.call('settings', {'quotation_next':'500'}, 400)
+        self.assertEqual(self.call('state')['settings']['invoice_next'], '101')
+        self.call('settings', {'quotation_prefix':'NE/INV/', 'quotation_next':'101'}, 400)
+        self.assertEqual(self.call('state')['settings']['quotation_prefix'], 'NE/Q/')
+
+    def test_existing_documents_migrate_to_reserved_number_registry(self):
+        self.seed()
+        self.document()
+        # Simulate an older database whose issued documents predate the registry.
+        with app.connect() as db:
+            db.execute('DELETE FROM document_numbers')
+        app.initialize()
+        app.initialize()  # Migration must be safe to repeat.
+        with app.connect() as db:
+            numbers = [row['number'] for row in db.execute('SELECT number FROM document_numbers')]
+        self.assertEqual(numbers, ['INV-00001'])
+        self.assertEqual(self.call('state')['settings']['invoice_next'], '2')
+        self.call('clear', {'password':'a-clearing-password', 'confirmation':'CLEAR ALL DATA'})
+        self.call('settings', {'invoice_next':'1'}, 400)
+
+    def test_failed_document_rolls_back_number_reservation_and_stock(self):
+        self.seed()
+        # Tax is checked after stock updates and reservation of the next number.
+        self.document(tax='NaN', expected=400)
+        state = self.call('state')
+        self.assertEqual(state['documents'], [])
+        self.assertEqual(state['products'][0]['stock'], 10)
+        self.assertEqual(state['settings']['invoice_next'], '1')
+        with app.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM document_numbers').fetchone()[0], 0)
+        self.document()
+        state = self.call('state')
+        self.assertEqual(state['documents'][0]['number'], 'INV-00001')
+        self.assertEqual(state['products'][0]['stock'], 8)
+
+    def test_concurrent_invoices_allocate_distinct_numbers(self):
+        self.seed()
+        barrier = threading.Barrier(4)
+        cookie = 'session=' + next(iter(app.SESSIONS))
+        payload = json.dumps({'kind':'invoice', 'party_id':1, 'issued':'2026-01-01',
+                              'due':'2026-02-01', 'tax':'0',
+                              'items':[{'product_id':1, 'qty':'2', 'price':'100'}]}).encode()
+
+        def create_invoice(_):
+            # Each caller owns its HTTP client; they share only the test session.
+            client = urllib.request.build_opener()
+            request = urllib.request.Request(self.base + '/api/documents', data=payload,
+                headers={'Content-Type':'application/json', 'Cookie':cookie})
+            barrier.wait(timeout=5)
+            with client.open(request, timeout=10) as response:
+                return response.status, json.load(response)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(create_invoice, range(4)))
+        self.assertEqual(results, [(200, {'ok':True})] * 4)
+        state = self.call('state')
+        self.assertEqual({d['number'] for d in state['documents']},
+                         {'INV-00001', 'INV-00002', 'INV-00003', 'INV-00004'})
+        self.assertEqual(len(state['documents']), 4)
+        self.assertEqual(state['settings']['invoice_next'], '5')
+        self.assertEqual(state['products'][0]['stock'], 2)
+        with app.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM document_numbers').fetchone()[0], 4)
+
+    def test_different_passwords_and_clearing_rate_limit(self):
+        self.call('passwords', {'current_password':'a-login-password',
+                               'clear_password':'a-login-password'}, 400)
+        self.call('passwords', {'current_password':'a-login-password',
+                               'password':'a-clearing-password'}, 400)
+        self.call('passwords', {'current_password':'a-login-password',
+                               'password':'a-shared-password', 'clear_password':'a-shared-password'}, 400)
+        self.seed()
+        for _ in range(5):
+            self.call('clear', {'password':'wrong-password', 'confirmation':'CLEAR ALL DATA'}, 401)
+        result = self.call('clear', {'password':'a-clearing-password', 'confirmation':'CLEAR ALL DATA'}, 401)
+        self.assertIn('Too many', result['error'])
+        self.assertEqual(len(self.call('state')['products']), 1)
+
+    def test_initial_setup_rejects_identical_passwords(self):
+        # Use a separate empty DB without changing the configured account.
+        original = app.DB_PATH
+        try:
+            app.DB_PATH = Path(self.temp.name) / 'fresh.db'
+            app.initialize()
+            self.call('setup', {'username':'owner', 'password':'same-password',
+                                'clear_password':'same-password'}, 400)
+            self.assertTrue(self.call('status')['setup'])
+        finally:
+            app.DB_PATH = original
+
+    def test_oversized_document_is_rejected_without_consuming_number(self):
+        self.seed()
+        self.document('purchase_order', qty='1000000000', price='1000000000', expected=400)
+        self.assertEqual(self.call('state')['documents'], [])
+        self.assertEqual(self.call('state')['settings']['purchase_order_next'], '1')
+        self.document('purchase_order')
+        self.assertEqual(self.call('state')['documents'][0]['number'], 'PO-00001')
 
 
 if __name__=='__main__':

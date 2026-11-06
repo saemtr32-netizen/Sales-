@@ -1,41 +1,79 @@
-# Ledger — Sales & Finance
+# Nexvant Engineering — Sales & Finance
 
-A mobile-friendly, self-hosted sales and financial management application. Uses Python 3.10+ and SQLite, with no third-party runtime packages or external services.
+A mobile-friendly sales, purchasing and financial management workspace for Nexvant Engineering. The server uses Python 3.10+ and SQLite, without third-party runtime packages. Android and Windows share the same records when connected to the same server.
 
-## Run
+## Downloads
+
+- [Android development APK](downloads/NexvantEngineering-Android.apk?raw=true) — Android 8.0+, connects to your running business server. Compilation and APK signatures are verified; installation and native features still need device testing.
+- [Windows launcher and complete source ZIP](downloads/NexvantEngineering-Windows-and-Source.zip?raw=true) — extract, install Python 3.10+ with Tcl/Tk, then double-click `start-windows.bat`. This package contains source and a launcher, not a prebuilt Windows executable.
+- [Download checksums](downloads/SHA256SUMS.txt)
+
+For a standalone Windows executable, manually run **Build Windows desktop application** under this repository's Actions tab and download its artifact, or follow [the Windows build instructions](windows/README.md). A successful Windows workflow run is needed before claiming the executable has been built and tested.
+
+## Start on a computer
 
 ```sh
 cd /workspace/Sales-
 python3 app.py
 ```
 
-Open the server in a browser and create your administrator account. Choose separate login and data-clearing passwords (10 characters minimum). No default credentials are shipped. For Windows, install Python 3.10+ and double-click `start-windows.bat`. This is a local Windows browser application; a native `.exe` installer is not included.
+Create your administrator account on first use. Choose **different login and data-clearing passwords**, at least 10 characters each. No default account is shipped. The server listens on `127.0.0.1:8000` by default.
 
-The server binds to `127.0.0.1:8000` by default. For a phone on a trusted local network, run `python3 app.py --host 0.0.0.0` and visit the computer's LAN address on port 8000. Allow that port in the Windows firewall only for a private trusted network. Do not expose this HTTP server to the public Internet. For remote access, put it behind an HTTPS reverse proxy; the default is intended for a single local business. Phones use the same database while connected; there is no offline phone sync.
+On **Windows**, install Python 3.10+ including Tcl/Tk and double-click `start-windows.bat`. A desktop control window starts the local application and opens your browser. It provides Start, Open application, Stop and optional phone access. See [Windows instructions](windows/README.md) for building a portable executable that includes Python, or using the manual GitHub Actions build. A Windows executable must be built and tested on Windows; this repository's Linux validation does not establish that the `.exe` has been built.
 
-## Workflow
+## Android phones
 
-1. Set company details, currency, document prefixes, and next numbers under Settings. Use one currency consistently; changing the label does not convert amounts.
-2. Add customer and supplier accounts. Add inventory products with opening quantity, cost, and selling price.
-3. Create invoices, quotations, or purchase orders. Invoice and quotation starting numbers are configurable. Document numbers are globally unique, allocated inside a database transaction, and cannot be reused.
-4. Invoices reduce stock and snapshot average costs. Quotes do not affect stock. Receive purchase orders once goods arrive; receipt increases stock and updates weighted average cost. Quantities are whole units.
-5. Record customer receipts and supplier payments, including partial payments. Overpayments are rejected. Customer and supplier statements list every charge/payment and each outstanding document's payment due date.
-6. Print documents, statements, and profit-and-loss reports, or save as PDF through the browser print dialog. A clean A4 invoice template is included. No uploaded template was available during implementation; exact matching remains pending receipt of that file.
-7. Record operating expenses. Profit and loss uses invoice revenue excluding tax, historical cost of goods sold, and operating expenses, with optional date filters. Purchase inventory is expensed when sold. This is an operational report, not full double-entry accounting or a tax filing system.
+See [Android instructions](android/README.md) for the native Android client, APK build/install instructions and server configuration. Android connects to the business server rather than keeping a separate offline database. Keep the Windows PC/server awake and running.
 
-## Security and backups
+For a trusted private Wi-Fi network, enable phone access in the Windows controller. Alternatively:
 
-Passwords are salted with PBKDF2-SHA256 (260,000 iterations). Sessions expire after 8 hours; login attempts are rate-limited. Password changes sign out all sessions. Data clearing requires the separate clearing password plus `CLEAR ALL DATA`; login, settings, and document counters remain intact. Protect the computer and its database with OS account permissions and disk encryption. This release has a single administrator account and no password recovery service.
+```sh
+python3 app.py --host 0.0.0.0
+```
 
-Data lives in `data/sales.db` (override with `SALES_DB`). For a complete restorable backup, stop the server and copy the `data` folder to a protected location. Restore by stopping the server and replacing that folder with the backup. Settings also provides a readable JSON export of business records; it excludes password hashes and is not an automatic restore format. Keep backups private. Data clearing does not erase copies in backups or guarantee forensic erasure from disk.
+Use the PC's private IPv4 address and port 8000 in the Android connection screen, with its explicit local HTTP option. Limit the firewall rule to private networks. For remote access use an HTTPS reverse proxy and its HTTPS URL. Do not expose the raw HTTP server publicly or forward port 8000 through your router. Android requires Android 8.0 or newer and a current Android System WebView.
 
-Documents are immutable after creation. Returns, cancellations, credit notes, document conversion, stock adjustments, multi-user roles, bank reconciliation, and native Windows packaging are not implemented. Avoid entering erroneous opening balances or documents; validate before saving.
+## Set up Nexvant documents
 
-## Validation
+Under **Settings**:
+
+- Enter the business name, address, contact details, tax ID, currency, bank details and document terms.
+- Select a PNG, JPEG or WebP logo (up to 700 KiB), then save company settings. It appears in the workspace and printable documents/reports. A simple NE monogram is used until a logo is selected.
+- Set each document prefix and **next invoice / quotation / purchase order number**. For example, prefix `NE/INV/` with next number `100` produces `NE/INV/00100`. A preview shows the next number. The setting affects future documents; already-issued numbers remain reserved even after business data is cleared.
+
+A branded A4 invoice/quotation/order layout is included with contact details, logo, itemized amounts, tax, payment due date, bank details and terms. The chat logo's original image bytes were not available to the checkout, so it has not been substituted with a recreated logo: select the original file in Settings. An invoice template file was not available; exact matching remains pending that template.
+
+## Business workflow
+
+1. Add customer and supplier accounts.
+2. Add inventory products with opening whole-unit quantity, unit cost and selling price.
+3. Create invoices, quotations or purchase orders. Invoices reduce stock and snapshot historical unit costs. Quotations do not change stock. Receiving a purchase order increases stock once and updates weighted average cost.
+4. Record full or partial customer receipts and supplier payments. Overpayments are rejected.
+5. Open **Statement** for any customer/supplier to view every charge/payment, running balance, outstanding documents and each payment due date. Print or save as PDF. Overdue balances are highlighted.
+6. Record operating expenses. Open **Reports** for date-filtered profit and loss and printable account statements. Revenue excludes tax; cost of goods sold uses the cost captured on invoices; operating expenses reduce profit. Inventory purchases are expensed when sold rather than deducted again in full.
+7. Use Print / save PDF on invoices, quotations, purchase orders and statements. Android uses its native print/PDF dialog; desktop browsers use their print dialog.
+
+This is an operational finance tool for a single business and administrator, not statutory tax filing or full double-entry accounting. Currency settings change the label, not historical amounts. Documents are immutable after creation. Returns, credit notes, cancellations, partial purchase receipts, automatic quotation conversion, multi-user roles and offline phone synchronization are not implemented.
+
+## Passwords, clearing and backups
+
+Passwords use salted PBKDF2-SHA256 (260,000 iterations); sessions expire after eight hours. Login attempts and incorrect clearing attempts are rate-limited. Password changes sign out existing sessions. There is no password recovery service.
+
+**Clear all business data** requires a signed-in session, the separate clearing password and the exact phrase `CLEAR ALL DATA`. It deletes parties, stock, documents, payments and expenses while keeping the account, business settings and issued-number registry. Clearing does not erase copies in backups or guarantee forensic erasure.
+
+Direct Python server data is stored in `data/sales.db`. The Windows controller uses `%LOCALAPPDATA%\NexvantEngineering\data\sales.db` and offers to copy an existing repository database on first launch. `SALES_DB` overrides either location. Existing company details and records are preserved during schema upgrades; only the original placeholder company name is replaced with Nexvant Engineering.
+
+For a restorable backup, stop the server and copy its entire data directory to a private location. Restore while the server is stopped. **Export business records** produces readable JSON without password hashes; it is not an automatic database restore format. Protect the computer and backups using OS account permissions and disk encryption.
+
+## Development checks
 
 ```sh
 python3 -m unittest discover -s tests -v
 node --check static/app.js
+python3 -m unittest discover -s windows -p 'test_desktop.py' -v
+python3 windows/desktop.py --smoke-test
 ```
 
-Tests use a temporary SQLite database and a real local HTTP server, leaving business data untouched. No dependency installation, cloud credentials, or network access is required to run the application.
+HTTP tests and desktop smoke checks use temporary SQLite databases and local servers, leaving business records untouched. The mobile/desktop browser workflow is additionally verified using Playwright and Chromium when available. Android build and address-policy checks are documented in `android/README.md`. Windows executable and Android device testing are separate from source-level checks; see platform documentation for the exact validation performed.
+
+For the optional browser check, install Playwright and Chromium in your development environment, then run `python3 tests/browser_smoke.py --artifacts-dir /tmp/nexvant-browser-check`. It exercises real forms, purchasing, inventory, payments, statements, PDF contents, mobile layouts and the Android bridge hooks against a disposable database.
