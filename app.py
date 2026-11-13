@@ -44,6 +44,13 @@ def initialize():
         CREATE TABLE IF NOT EXISTS expenses(id INTEGER PRIMARY KEY,description TEXT NOT NULL,amount INTEGER NOT NULL,paid TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS document_numbers(number TEXT PRIMARY KEY);
         ''')
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(products)')}
+        if 'reorder_level' not in columns:
+            db.execute('ALTER TABLE products ADD COLUMN reorder_level INTEGER NOT NULL DEFAULT 5')
+        db.execute('''CREATE TABLE IF NOT EXISTS stock_adjustments(
+            id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
+            quantity INTEGER NOT NULL, reason TEXT NOT NULL, adjusted TEXT NOT NULL,
+            stock_before INTEGER NOT NULL, stock_after INTEGER NOT NULL)''')
         defaults = {'company':'Nexvant Engineering','address':'','currency':'INR','invoice_next':'1','quotation_next':'1','purchase_order_next':'1','invoice_prefix':'INV-','quotation_prefix':'QUO-','purchase_order_prefix':'PO-',
                     'logo':'','email':'','phone':'','tax_id':'','bank_details':'','document_terms':''}
         db.executemany('INSERT OR IGNORE INTO settings VALUES (?,?)', defaults.items())
@@ -117,6 +124,7 @@ def rows(db, sql, params=()):
 def state(db):
     return {'settings':dict(db.execute('SELECT key,value FROM settings').fetchall()),
             'parties':rows(db,'SELECT * FROM parties ORDER BY name'),
+            'adjustments':rows(db,'''SELECT a.*,p.name product_name,p.sku FROM stock_adjustments a JOIN products p ON p.id=a.product_id ORDER BY a.id DESC'''),
             'products':rows(db,'SELECT * FROM products ORDER BY name'),
             'documents':rows(db,'''SELECT d.*,p.name party_name,p.kind party_kind,COALESCE((SELECT SUM(amount) FROM payments WHERE document_id=d.id),0) paid FROM documents d JOIN parties p ON p.id=d.party_id ORDER BY d.id DESC'''),
             'lines':rows(db,'SELECT * FROM lines'), 'payments':rows(db,'SELECT * FROM payments ORDER BY paid,id'),
@@ -225,6 +233,27 @@ class Handler(BaseHTTPRequestHandler):
             db.execute('INSERT INTO parties(name,kind,email,phone,address) VALUES(?,?,?,?,?)',(required(data,'name'),kind,str(data.get('email','')),str(data.get('phone','')),str(data.get('address',''))))
         elif path == '/api/products':
             db.execute('INSERT INTO products(name,sku,price,cost,stock) VALUES(?,?,?,?,?)',(required(data,'name'),required(data,'sku'),money(data['price']),money(data['cost']),integer(data['stock'],0)))
+        elif path == '/api/product-update':
+            product = db.execute('SELECT * FROM products WHERE id=?',(data['id'],)).fetchone()
+            if not product:
+                raise ValueError('Product not found.')
+            db.execute('UPDATE products SET name=?,sku=?,price=?,reorder_level=? WHERE id=?',
+                       (required(data,'name'),required(data,'sku'),money(data['price']),integer(data['reorder_level'],0),product['id']))
+        elif path == '/api/stock-adjustments':
+            product = db.execute('SELECT * FROM products WHERE id=?',(data['product_id'],)).fetchone()
+            if not product:
+                raise ValueError('Product not found.')
+            raw = str(data['quantity'])
+            quantity = int(raw)
+            if str(quantity) != raw or quantity == 0 or abs(quantity) > 1000000000:
+                raise ValueError('Enter a nonzero whole quantity, positive or negative.')
+            stock = product['stock'] + quantity
+            if not 0 <= stock <= 1000000000:
+                raise ValueError('Adjustment would put stock outside the allowed range.')
+            reason, adjusted = required(data,'reason'), valid_date(data['adjusted'])
+            db.execute('UPDATE products SET stock=? WHERE id=?',(stock,product['id']))
+            db.execute('INSERT INTO stock_adjustments(product_id,quantity,reason,adjusted,stock_before,stock_after) VALUES(?,?,?,?,?,?)',
+                       (product['id'],quantity,reason,adjusted,product['stock'],stock))
         elif path == '/api/documents':
             kind = required(data,'kind')
             if kind not in KINDS:
@@ -346,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
             if data.get('confirmation') != 'CLEAR ALL DATA' or not check_password(str(data.get('password','')),user['clear_salt'],user['clear_password']):
                 recent.append(time.time())
                 raise PermissionError('Clearing password or confirmation is incorrect.')
-            for table in ('payments','lines','documents','expenses','products','parties'):
+            for table in ('stock_adjustments','payments','lines','documents','expenses','products','parties'):
                 db.execute(f'DELETE FROM {table}')
             # Keep login, company details, and numbering to avoid reuse of issued numbers.
         else:

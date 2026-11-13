@@ -41,6 +41,26 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(response.status,expected,response.read().decode() if response.status!=expected else '')
         return json.load(response)
 
+    def test_inventory_adjustments_and_product_edit(self):
+        self.seed()
+        self.call('product-update', {'id':1, 'name':'Updated product', 'sku':'NEW-SKU',
+                                    'price':'125.50', 'reorder_level':'8'})
+        self.call('stock-adjustments', {'product_id':1,'quantity':'-3',
+                                       'reason':'Damaged in storage','adjusted':'2026-11-13'})
+        state = self.call('state')
+        product = state['products'][0]
+        self.assertEqual((product['stock'],product['price'],product['reorder_level']), (7,12550,8))
+        adjustment = state['adjustments'][0]
+        self.assertEqual((adjustment['stock_before'],adjustment['stock_after']), (10,7))
+        self.assertEqual(adjustment['reason'], 'Damaged in storage')
+        for quantity in ['-8','0','1.5']:
+            self.call('stock-adjustments', {'product_id':1,'quantity':quantity,
+                                           'reason':'Invalid','adjusted':'2026-11-13'},400)
+        self.assertEqual(self.call('state')['products'][0]['stock'],7)
+        self.assertEqual(len(self.call('state')['adjustments']),1)
+        self.call('clear', {'password':'a-clearing-password','confirmation':'CLEAR ALL DATA'})
+        self.assertEqual(self.call('state')['adjustments'], [])
+
     def seed(self):
         self.call('parties',{'name':'Customer A','kind':'customer'})
         self.call('parties',{'name':'Supplier B','kind':'supplier'})

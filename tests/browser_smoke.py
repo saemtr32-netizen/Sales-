@@ -67,7 +67,7 @@ def run(artifacts):
                         page.locator('[name=username]').fill('owner')
                         page.locator('[name=password]').fill('a-login-password')
                         page.get_by_role('button', name='Sign in').click()
-                        page.get_by_role('heading', name='Business overview').wait_for()
+                        page.get_by_role('heading', name='Inventory overview').wait_for()
 
                         def navigate(key):
                             page.locator(f'[data-page="{key}"]').first.click()
@@ -173,6 +173,24 @@ def run(artifacts):
                         backup = page.evaluate('window.__backup')
                         assert backup['name'].startswith('nexvant-records-') and len(backup['data']['documents']) == 3
                         assert 'users' not in backup['data']
+                        navigate('inventory')
+                        page.locator('[data-action="edit-product"]').first.click()
+                        page.locator('[name=reorder_level]').fill('50')
+                        page.get_by_role('button', name='Save product', exact=True).click()
+                        page.wait_for_selector('#modal', state='hidden')
+                        page.locator('[data-action="adjust-stock"]').first.click()
+                        page.locator('[name=quantity]').fill('-1')
+                        page.locator('[name=reason]').fill('Cycle count correction')
+                        page.get_by_role('button', name='Save adjustment', exact=True).click()
+                        page.wait_for_selector('#modal', state='hidden')
+                        navigate('adjustments')
+                        assert 'Cycle count correction' in page.locator('.content').inner_text()
+                        navigate('inventory')
+                        page.get_by_role('button', name='Low stock', exact=True).click()
+                        assert page.locator('[data-action="edit-product"]').count() > 0
+                        page.get_by_role('button', name='Out of stock', exact=True).click()
+                        assert 'No items match this view' in page.locator('.content').inner_text()
+                        page.get_by_role('button', name='All items', exact=True).click()
                         navigate('dashboard')
                         page.locator('#toast').evaluate('(el) => el.style.display = "none"')
                         page.screenshot(path=str(artifacts / 'dashboard-desktop.png'), full_page=True)

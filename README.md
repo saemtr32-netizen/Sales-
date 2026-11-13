@@ -43,6 +43,14 @@ Under **Settings**:
 
 A branded A4 invoice/quotation/order layout is included with contact details, logo, itemized amounts, tax, payment due date, bank details and terms. The chat logo's original image bytes were not available to the checkout, so it has not been substituted with a recreated logo: select the original file in Settings. An invoice template file was not available; exact matching remains pending that template.
 
+## Inventory workspace
+
+The inventory overview shows stock on hand, inventory value, low-stock items and purchase orders awaiting receipt, using your saved company details. Inventory supports name/SKU search and All items, Low stock and Out of stock views. Click an item to edit its name, SKU, selling price and reorder level (default 5 units). Historical documents keep their original item details.
+
+Use **Adjust stock** for counted differences or damage: enter a signed whole quantity, date and reason. Negative stock is rejected. The Stock adjustments page records each correction with before/after quantities; purchase receipts and invoice deductions remain in their respective documents. Adjustments keep average unit cost unchanged and do not create accounting expense entries. Inventory valuation uses current stock multiplied by weighted average unit cost. Existing SQLite databases upgrade automatically on startup.
+
+This workspace provides core inventory, purchasing and invoicing workflows inspired by inventory-management products; it does not include Zoho integrations, multi-warehouse transfers, barcode scanning or shipment tracking.
+
 ## Business workflow
 
 1. Add customer and supplier accounts.
