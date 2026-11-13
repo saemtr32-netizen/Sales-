@@ -140,6 +140,56 @@ class WorkflowTest(unittest.TestCase):
             self.client.open(req)
         self.assertEqual(error.exception.code,403)
 
+    def test_username_and_password_change_preserves_records_and_revokes_sessions(self):
+        self.seed()
+        before = self.call('state')
+        self.call('passwords', {'username':'new-owner','current_password':'wrong-password',
+                                'password':'new-login-password'},401)
+        self.assertEqual(self.call('state')['account']['username'],'owner')
+        self.call('passwords', {'username':'new-owner','current_password':'a-login-password',
+                                'password':'new-login-password','confirm_password':'does-not-match'},400)
+        self.call('passwords', {'username':'new-owner','current_password':'a-login-password',
+                                'password':'short'},400)
+        self.assertEqual(self.call('state'),before)
+        self.call('passwords', {'username':'new-owner','current_password':'a-login-password',
+                                'password':'new-login-password','confirm_password':'new-login-password'})
+        self.call('state',expected=401)
+        self.call('login',{'username':'owner','password':'a-login-password'},401)
+        self.call('login',{'username':'new-owner','password':'a-login-password'},401)
+        self.call('login',{'username':'new-owner','password':'new-login-password'})
+        after = self.call('state')
+        self.assertEqual(after.pop('account'),{'username':'new-owner'})
+        before.pop('account')
+        self.assertEqual(after,before)
+        self.call('clear',{'password':'a-clearing-password','confirmation':'CLEAR ALL DATA'})
+
+    def test_username_only_change_and_account_attempt_limit(self):
+        self.call('passwords',{'username':'renamed-owner','current_password':'a-login-password'})
+        self.call('login',{'username':'renamed-owner','password':'a-login-password'})
+        self.assertEqual(self.call('state')['account']['username'],'renamed-owner')
+        self.call('passwords',{'username':'','current_password':'a-login-password'},400)
+        for _ in range(5):
+            self.call('passwords',{'username':'intruder','current_password':'wrong-password'},401)
+        result = self.call('passwords',{'username':'intruder','current_password':'a-login-password'},401)
+        self.assertIn('Too many',result['error'])
+        self.assertEqual(self.call('state')['account']['username'],'renamed-owner')
+
+    def test_local_recovery_invalidates_existing_session_and_preserves_data(self):
+        from reset_account import reset_admin
+        self.seed()
+        before = self.call('state')
+        reset_admin(app.DB_PATH,'recovered-owner','recovered-login-password','recovered-clear-password')
+        # Recovery runs outside the HTTP process; database versioning must reject its old cookie.
+        self.assertTrue(app.SESSIONS)
+        self.call('state',expected=401)
+        self.call('login',{'username':'owner','password':'a-login-password'},401)
+        self.call('login',{'username':'recovered-owner','password':'recovered-login-password'})
+        after = self.call('state')
+        self.assertEqual(after.pop('account'),{'username':'recovered-owner'})
+        before.pop('account')
+        self.assertEqual(after,before)
+        self.call('clear',{'password':'recovered-clear-password','confirmation':'CLEAR ALL DATA'})
+
     def test_branding_settings_and_logo_validation(self):
         settings = self.call('state')['settings']
         self.assertEqual(settings['company'], 'Nexvant Engineering')

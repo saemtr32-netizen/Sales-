@@ -51,6 +51,8 @@ def initialize():
             id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
             quantity INTEGER NOT NULL, reason TEXT NOT NULL, adjusted TEXT NOT NULL,
             stock_before INTEGER NOT NULL, stock_after INTEGER NOT NULL)''')
+        if 'credential_version' not in {row['name'] for row in db.execute('PRAGMA table_info(users)')}:
+            db.execute('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0')
         defaults = {'company':'Nexvant Engineering','address':'','currency':'INR','invoice_next':'1','quotation_next':'1','purchase_order_next':'1','invoice_prefix':'INV-','quotation_prefix':'QUO-','purchase_order_prefix':'PO-',
                     'logo':'','email':'','phone':'','tax_id':'','bank_details':'','document_terms':''}
         db.executemany('INSERT OR IGNORE INTO settings VALUES (?,?)', defaults.items())
@@ -71,6 +73,29 @@ def required(data, name):
     if not value or len(value) > 2000:
         raise ValueError(f'{name.replace("_", " ").title()} is required (maximum 2000 characters).')
     return value
+
+
+def update_account(db, user, username, password='', clear_password=''):
+    """Validate all credentials before changing this administrator's account."""
+    username = required({'username':username}, 'username')
+    for value in (password, clear_password):
+        if value and not 10 <= len(value) <= 2000:
+            raise ValueError('Passwords must contain between 10 and 2000 characters.')
+        if value and value != value.strip():
+            raise ValueError('Passwords must not start or end with whitespace.')
+    if (password and clear_password and password == clear_password
+            or password and not clear_password and check_password(password,user['clear_salt'],user['clear_password'])
+            or clear_password and not password and check_password(clear_password,user['salt'],user['password'])):
+        raise ValueError('Use different login and data clearing passwords.')
+    if username == user['username'] and not password and not clear_password:
+        raise ValueError('Enter a new username or password.')
+    db.execute('UPDATE users SET username=?,credential_version=credential_version+1 WHERE id=?',
+               (username,user['id']))
+    for value, salt_col, hash_col in [(password,'salt','password'),(clear_password,'clear_salt','clear_password')]:
+        if value:
+            salt = secrets.token_hex(16)
+            db.execute(f'UPDATE users SET {salt_col}=?,{hash_col}=? WHERE id=?',
+                       (salt,password_hash(value,salt),user['id']))
 
 
 def money(value):
@@ -143,6 +168,11 @@ class Handler(BaseHTTPRequestHandler):
         if not session or session['expires'] < time.time():
             SESSIONS.pop(token, None)
             return None
+        with connect() as db:
+            user = db.execute('SELECT credential_version FROM users WHERE id=?',(session['user_id'],)).fetchone()
+        if not user or session.get('credential_version') != user['credential_version']:
+            SESSIONS.pop(token, None)
+            return None
         return session
 
     def do_GET(self):
@@ -151,11 +181,15 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as db:
                 return self.send(200, {'setup':not bool(db.execute('SELECT 1 FROM users').fetchone()),'authenticated':bool(self.session())})
         if path.startswith('/api/'):
-            if not self.session():
+            session = self.session()
+            if not session:
                 return self.send(401, {'error':'Please log in.'})
             with connect() as db:
                 if path == '/api/state':
-                    return self.send(200, state(db))
+                    result = state(db)
+                    result['account'] = dict(db.execute('SELECT username FROM users WHERE id=?',
+                                                       (session['user_id'],)).fetchone())
+                    return self.send(200, result)
                 if path == '/api/backup':
                     return self.send(200, {'version':1, 'exported':date.today().isoformat(), **state(db)})
             return self.send(404, {'error':'Not found.'})
@@ -199,7 +233,8 @@ class Handler(BaseHTTPRequestHandler):
             if password == clear:
                 raise ValueError('Use different login and data clearing passwords.')
             salt, clear_salt = secrets.token_hex(16), secrets.token_hex(16)
-            db.execute('INSERT INTO users VALUES(1,?,?,?,?,?)',(username,salt,password_hash(password,salt),clear_salt,password_hash(clear,clear_salt)))
+            db.execute('INSERT INTO users(id,username,salt,password,clear_salt,clear_password) VALUES(1,?,?,?,?,?)',
+                       (username,salt,password_hash(password,salt),clear_salt,password_hash(clear,clear_salt)))
             return {'ok':True}
         if path == '/api/login':
             # Limit brute-force attempts per client without retaining credentials.
@@ -215,7 +250,8 @@ class Handler(BaseHTTPRequestHandler):
                 recent.append(time.time())
                 raise PermissionError('Invalid username or password.')
             token = secrets.token_urlsafe(32)
-            SESSIONS[token] = {'user_id':user['id'],'expires':time.time()+8*3600}
+            SESSIONS[token] = {'user_id':user['id'],'expires':time.time()+8*3600,
+                               'credential_version':user['credential_version']}
             self.session_cookie = f'session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800'
             return {'ok':True}
         session = self.session()
@@ -348,21 +384,23 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute('UPDATE settings SET value=? WHERE key=?',(prefix,kind+'_prefix'))
         elif path == '/api/passwords':
             user = db.execute('SELECT * FROM users WHERE id=?',(session['user_id'],)).fetchone()
+            attempts = getattr(self.server, 'account_attempts', {})
+            self.server.account_attempts = attempts
+            key = self.client_address[0]
+            recent = [t for t in attempts.get(key,[]) if t > time.time()-60]
+            attempts[key] = recent
+            if len(recent) >= 5:
+                raise PermissionError('Too many attempts. Try again in one minute.')
             if not check_password(str(data.get('current_password','')),user['salt'],user['password']):
+                recent.append(time.time())
                 raise PermissionError('Current login password is incorrect.')
-            new_login, new_clear = str(data.get('password','')), str(data.get('clear_password',''))
-            if (new_login and new_clear and new_login == new_clear
-                    or new_login and not new_clear and check_password(new_login,user['clear_salt'],user['clear_password'])
-                    or new_clear and not new_login and check_password(new_clear,user['salt'],user['password'])):
-                raise ValueError('Use different login and data clearing passwords.')
-            for name, salt_col, hash_col in [('password','salt','password'),('clear_password','clear_salt','clear_password')]:
-                value = str(data.get(name,''))
-                if value:
-                    if len(value)<10:
-                        raise ValueError('Passwords must contain at least 10 characters.')
-                    salt=secrets.token_hex(16)
-                    db.execute(f'UPDATE users SET {salt_col}=?,{hash_col}=? WHERE id=?',(salt,password_hash(value,salt),session['user_id']))
+            for name in ('password','clear_password'):
+                if 'confirm_'+name in data and data.get(name,'') != data['confirm_'+name]:
+                    raise ValueError('The new password and its confirmation must match.')
+            update_account(db, user, data.get('username',user['username']),
+                           str(data.get('password','')), str(data.get('clear_password','')))
             SESSIONS.clear()
+            self.session_cookie = 'session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'
         elif path == '/api/clear':
             user=db.execute('SELECT * FROM users WHERE id=?',(session['user_id'],)).fetchone()
             attempts = getattr(self.server, 'clear_attempts', {})

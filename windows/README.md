@@ -39,3 +39,9 @@ Stop the controller first, then copy the entire `%LOCALAPPDATA%\NexvantEngineeri
 ## Verification limits
 
 The source controller and bundled-asset smoke test can be exercised on Linux without opening the Tkinter window. A Windows build and interactive Windows desktop check must run on Windows; source validation alone does not establish that a Windows binary has been built or tested.
+
+## Change or recover the administrator account
+
+While signed in, use **Settings → Security & data → Change username & passwords**. Enter your current login password and confirm any new passwords. Saving signs out existing sessions while retaining company settings and business records.
+
+If you cannot sign in, stop the desktop controller, back up its data directory, and double-click **reset-account-windows.bat** in the extracted software folder. Check the database path before confirming `RESET`. Choose a new username and login password at the prompts; password entry is hidden. You can also replace a forgotten data-clearing password. Start the controller again and sign in. This launcher requires Python 3.10+ and uses the controller's existing database path or `SALES_DB`. For custom locations, run `py -3 reset_account.py --database "C:\path\to\sales.db"`.

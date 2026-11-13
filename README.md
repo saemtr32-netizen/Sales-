@@ -65,7 +65,28 @@ This is an operational finance tool for a single business and administrator, not
 
 ## Passwords, clearing and backups
 
-Passwords use salted PBKDF2-SHA256 (260,000 iterations); sessions expire after eight hours. Login attempts and incorrect clearing attempts are rate-limited. Password changes sign out existing sessions. There is no password recovery service.
+Passwords use salted PBKDF2-SHA256 (260,000 iterations); sessions expire after eight hours. Login attempts and incorrect clearing attempts are rate-limited. Username or password changes sign out existing sessions, including sessions held by another running server using the same database.
+
+### Change your username or passwords
+
+Sign in, open **Settings → Security & data → Change username & passwords**, and enter your current login password. Change the username and/or choose a new login password. Leave optional password fields blank to keep them. Confirm any new passwords; login and data-clearing passwords must be different and at least 10 characters. Saving signs out existing sessions. Sign back in with your updated credentials. Company settings, inventory and business records stay intact.
+
+### Recover a forgotten username or password
+
+The sign-in screen includes **Forgot username or password?** with recovery instructions. Recovery requires access to the computer and existing database file that run the server; there is no email reset service.
+
+1. Close the Windows controller or stop the Python server. Back up your existing data directory.
+2. On Windows, extract the updated software package and double-click **reset-account-windows.bat**. It uses the same `%LOCALAPPDATA%\NexvantEngineering\data\sales.db` location as the Windows controller, or `SALES_DB` when set.
+3. Verify the displayed database path, type `RESET`, and enter a new username. Enter and confirm your new login password at the hidden prompts. You may also replace a forgotten data-clearing password with a different password.
+4. Start the application and sign in with your new credentials. Company settings, numbering and business records are retained.
+
+For direct Python installations or a custom database path, run from the extracted software folder:
+
+```sh
+python3 reset_account.py --database /path/to/your/existing/data/sales.db
+```
+
+On Windows, the equivalent is `py -3 reset_account.py --database "C:\path\to\sales.db"`. Select the database used by your installation; the tool refuses missing files rather than creating a new installation. Passwords are never supplied in command-line arguments or printed. Protect access to your server computer and database files, since local file access permits administrator recovery.
 
 **Clear all business data** requires a signed-in session, the separate clearing password and the exact phrase `CLEAR ALL DATA`. It deletes parties, stock, documents, payments and expenses while keeping the account, business settings and issued-number registry. Clearing does not erase copies in backups or guarantee forensic erasure.
 
